@@ -1,0 +1,57 @@
+name: GHCR token probe
+
+# Throwaway test for kserve PR #6446, finding 1. Run it in a fork only, from a
+# branch PR'd into the fork's own master, never against kserve/kserve.
+#
+# seed  pushes :canary with an explicit packages: write, the way the publish job
+#       creates the package and links this repo to it.
+# probe mimics an e2e job: the token arrives only through the workflow-level env,
+#       as in e2e-test.yml, and the step never names it in YAML. That stands in
+#       for a dependency, test script or action that runs in the job but cannot
+#       edit the workflow.
+#
+# Test 2 (the fix): uncomment the workflow-level permissions block below.
+
+on:
+  pull_request:
+
+# permissions:
+#   contents: read
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Push canary
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kserve-e2e-images"
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          printf 'FROM busybox:1.36\nLABEL probe=canary\n' | docker build -t "${repo}:canary" -
+          docker push "${repo}:canary"
+
+  probe:
+    needs: seed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try to push using only the ambient token
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kserve-e2e-images"
+          tag="${repo}:probe-${GITHUB_RUN_ID}"
+          printf 'FROM busybox:1.36\nLABEL probe=poisoned\n' | docker build -t "${tag}" -
+          if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+            result="no token in env"
+          elif ! echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin; then
+            result="login failed"
+          elif docker push "${tag}"; then
+            result="PUSH SUCCEEDED: ${tag} (cache is writable from this job)"
+          else
+            result="push denied (cache is not writable from this job)"
+          fi
+          echo "${result}"
+          echo "### probe: ${result}" >>"${GITHUB_STEP_SUMMARY}"
